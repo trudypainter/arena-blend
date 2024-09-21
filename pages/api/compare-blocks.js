@@ -1,160 +1,370 @@
-import axios from "axios";
+export const config = {
+  runtime: "edge",
+};
 
-export default async function handler(req, res) {
-  const { user1, user2 } = req.query;
+export default async function handler(req) {
+  const { searchParams } = new URL(req.url);
+  const user1 = searchParams.get("user1");
+  const user2 = searchParams.get("user2");
+  const concurrencyLimit = parseInt(searchParams.get("concurrencyLimit")) || 5;
+  const maxSortedChannels =
+    parseInt(searchParams.get("maxSortedChannels")) || 15;
 
   if (!user1 || !user2) {
-    return res
-      .status(400)
-      .json({ error: "Both user1 and user2 parameters are required" });
+    return new Response(
+      JSON.stringify({ error: "Both user1 and user2 parameters are required" }),
+      {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
   }
 
   const accessToken = "jOjmF09t2R8a_7pB-5u6VnexekhMzrtLoVVDoUityBg";
 
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders();
-
-  try {
-    // Fetch blocks for both users
-    const user1Blocks = await fetchUserBlocks(user1, accessToken, res);
-    const user2Blocks = await fetchUserBlocks(user2, accessToken, res);
-
-    // Find common blocks between the two users
-    const commonBlocks = findCommonBlocks(user1Blocks, user2Blocks);
-
-    res.write(
-      `data: ${JSON.stringify({ commonBlocks, user1Blocks, user2Blocks })}\n\n`
-    );
-    res.end();
-  } catch (error) {
-    console.error("Error comparing blocks:", error);
-    res.write(
-      `data: ${JSON.stringify({
-        error: "An error occurred while comparing blocks",
-      })}\n\n`
-    );
-    res.end();
-  }
-}
-
-async function fetchUserBlocks(username, accessToken, res) {
-  const blocksLog = [];
-
-  try {
-    const userResponse = await axios.get(
-      `https://api.are.na/v2/users/${username}`,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      }
-    );
-    const userId = userResponse.data.id;
-    console.log("⭐️ Got userId", userId);
-
-    const channelsResponse = await axios.get(
-      `https://api.are.na/v2/users/${userId}/channels`,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      }
-    );
-
-    // Filter channels to only be ones created by the user AND that are public
-    let filteredChannels = channelsResponse.data.channels.filter((channel) => {
-      const isCreatedByUser = channel.user_id === userId;
-      if (!isCreatedByUser) {
-        console.log(
-          `Eliminated channel: ${channel.slug} ${channel.user_id} (not created by ${username} ${userId})`
+  const stream = new ReadableStream({
+    async start(controller) {
+      try {
+        const user1Blocks = await fetchUserBlocks(
+          user1,
+          accessToken,
+          controller,
+          concurrencyLimit,
+          maxSortedChannels
         );
-      }
-      if (!channel.published) {
-        console.log(
-          `Eliminated channel: ${channel.slug} because it's not public`
-        );
-      }
-      return channel.published && isCreatedByUser;
-    });
-
-    // Sort channels by updated_at and take the top 20 most recently updated
-    const sortedChannels = filteredChannels
-      .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
-      .slice(0, 20);
-
-    // Iterate over the top 10 channels
-    for (const channel of sortedChannels) {
-      let page = 1;
-      let hasMorePages = true;
-
-      console.log("💡 starting new channel", channel.slug);
-      while (hasMorePages && page <= 20) {
-        // Fetch 50 blocks from the channel for the current page
-        const channelBlocksResponse = await axios.get(
-          `https://api.are.na/v2/channels/${channel.slug}/contents?per=50&page=${page}`,
-          {
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-            },
-          }
-        );
-        const channelBlocks = channelBlocksResponse.data.contents;
-
-        // Log blocks with their id, the channel they belong to, and their source
-
-        for (const block of channelBlocks) {
-          // Check for whether there is a source
-          let blockSource = null;
-          if (block.source && block.source.url) {
-            blockSource = block.source.url;
-          }
-
-          blocksLog.push({
-            blockId: block.id,
-            channelId: channel.id,
-            channelName: channel.title,
-            source: blockSource,
-          });
-        }
-        console.log(
-          "💞 got blocks for channel",
-          channel.slug,
-          page,
-          channelBlocks.length
+        const user2Blocks = await fetchUserBlocks(
+          user2,
+          accessToken,
+          controller,
+          concurrencyLimit,
+          maxSortedChannels
         );
 
-        // Send progress update to the client
-        res.write(
+        const commonBlocks = findCommonBlocks(user1Blocks, user2Blocks);
+
+        const finalData = JSON.stringify({
+          commonBlocks,
+          user1Blocks,
+          user2Blocks,
+        });
+        controller.enqueue(`data: ${finalData}\n\n`);
+        controller.close();
+      } catch (error) {
+        console.error("Error comparing blocks:", error);
+        controller.enqueue(
           `data: ${JSON.stringify({
-            channel: channel.slug,
-            page,
-            blocks: channelBlocks.length,
+            error: "An error occurred while comparing blocks",
           })}\n\n`
         );
-
-        // Check if there are more pages
-        hasMorePages = channelBlocks.length === 50;
-        page++;
+        controller.close();
       }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "Content-Encoding": "none",
+    },
+  });
+}
+
+async function fetchUserBlocks(
+  username,
+  accessToken,
+  controller,
+  concurrencyLimit,
+  maxSortedChannels
+) {
+  const blocksMap = new Map();
+
+  try {
+    // Fetch user data
+    const userResponse = await fetch(
+      `https://api.are.na/v2/users/${username}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+    const userData = await userResponse.json();
+    const userId = userData.id;
+
+    // Fetch user's channels
+    const channelsResponse = await fetch(
+      `https://api.are.na/v2/users/${userId}/channels`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+    const channelsData = await channelsResponse.json();
+
+    // Filter and sort channels
+    const filteredChannels = channelsData.channels.filter(
+      (channel) => channel.published && channel.user_id === userId
+    );
+    const sortedChannels = filteredChannels
+      .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
+      .slice(0, maxSortedChannels);
+
+    const totalChannels = sortedChannels.length;
+
+    // Send initial user start message
+    controller.enqueue(
+      `data: ${JSON.stringify({
+        type: "userStart",
+        username,
+        totalChannels,
+      })}\n\n`
+    );
+
+    // Initialize channel index counter
+    let overallChannelIndex = 0;
+
+    // Process channels concurrently in batches
+    for (let i = 0; i < sortedChannels.length; i += concurrencyLimit) {
+      const group = sortedChannels.slice(i, i + concurrencyLimit);
+      await Promise.all(
+        group.map((channel, index) => {
+          // Calculate the overall channel index
+          const channelIndex = i + index + 1;
+          return processChannel(
+            channel,
+            channelIndex,
+            totalChannels,
+            username,
+            accessToken,
+            controller,
+            blocksMap
+          );
+        })
+      );
     }
   } catch (error) {
     console.error(`Error fetching blocks for user ${username}:`, error);
+    controller.enqueue(
+      `data: ${JSON.stringify({
+        error: `Error fetching blocks for user ${username}`,
+      })}\n\n`
+    );
   }
 
-  return blocksLog;
+  console.log(
+    `Server: Fetched ${blocksMap.size} unique blocks for user ${username}`
+  );
+
+  // Convert the blocksMap values to an array before returning
+  return Array.from(blocksMap.values());
+}
+
+async function processChannel(
+  channel,
+  channelIndex,
+  totalChannels,
+  username,
+  accessToken,
+  controller,
+  blocksMap
+) {
+  try {
+    // Fetch channel metadata to get total count
+    const channelMetadataResponse = await fetch(
+      `https://api.are.na/v2/channels/${channel.slug}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+    const channelMetadata = await channelMetadataResponse.json();
+    const pagesInChannel = Math.ceil(channelMetadata.length / 50);
+
+    // Send channel start message
+    controller.enqueue(
+      `data: ${JSON.stringify({
+        type: "channelStart",
+        username,
+        channelIndex,
+        totalChannels,
+        channelName: channel.slug,
+        pagesInChannel,
+      })}\n\n`
+    );
+
+    // Fetch all pages for this channel
+    for (let page = 1; page <= pagesInChannel; page++) {
+      await processPage(
+        page,
+        pagesInChannel,
+        channel,
+        channelIndex,
+        totalChannels,
+        username,
+        accessToken,
+        controller,
+        blocksMap
+      );
+    }
+
+    // Update the channel completion message
+    controller.enqueue(
+      `data: ${JSON.stringify({
+        type: "channelComplete",
+        username,
+        channelIndex,
+        totalChannels,
+        channelName: channel.slug,
+        pagesInChannel,
+        pagesFetched: pagesInChannel, // Add this line
+        blocksFetched: blocksMap.size,
+      })}\n\n`
+    );
+  } catch (error) {
+    console.error(`Error processing channel ${channel.slug}:`, error);
+    controller.enqueue(
+      `data: ${JSON.stringify({
+        error: `Error processing channel ${channel.slug}`,
+      })}\n\n`
+    );
+  }
+}
+
+async function processPage(
+  page,
+  pagesInChannel,
+  channel,
+  channelIndex,
+  totalChannels,
+  username,
+  accessToken,
+  controller,
+  blocksMap
+) {
+  try {
+    const channelBlocksResponse = await fetch(
+      `https://api.are.na/v2/channels/${channel.slug}/contents?per=50&page=${page}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+    const channelBlocksData = await channelBlocksResponse.json();
+    const channelBlocks = channelBlocksData.contents;
+
+    for (const block of channelBlocks) {
+      const blockId = block.id;
+      const blockSource = block.source?.url || null;
+      const imageURL = block.image?.square?.url || null;
+      const channelTitle = channel.title;
+
+      if (blocksMap.has(blockId)) {
+        // If the block already exists, add the channel title to the channels array if not already included
+        const existingBlock = blocksMap.get(blockId);
+        if (!existingBlock.channels.includes(channelTitle)) {
+          existingBlock.channels.push(channelTitle);
+        }
+      } else {
+        // Create a new block entry with the channels array
+        blocksMap.set(blockId, {
+          blockId: blockId,
+          source: blockSource,
+          imageURL: imageURL,
+          channels: [channelTitle],
+        });
+      }
+    }
+
+    // Send channel progress update
+    controller.enqueue(
+      `data: ${JSON.stringify({
+        type: "channelProgress",
+        username,
+        channelIndex,
+        totalChannels,
+        channelName: channel.slug,
+        page,
+        pagesInChannel,
+        blocksFetched: blocksMap.size,
+      })}\n\n`
+    );
+  } catch (error) {
+    console.error(
+      `Error processing page ${page} of channel ${channel.slug}:`,
+      error
+    );
+    controller.enqueue(
+      `data: ${JSON.stringify({
+        error: `Error processing page ${page} of channel ${channel.slug}`,
+      })}\n\n`
+    );
+  }
 }
 
 function findCommonBlocks(blocks1, blocks2) {
-  const map1 = new Map(blocks1.map((block) => [block.blockId, block]));
+  const map1 = new Map();
+  const excludedUrls = [
+    "https://www.instagram.com/",
+    "https://www.twitter.com/",
+    "https://twitter.com/home",
+    "https://www.tumblr.com/dashboard",
+    "https://www.tumblr.com/explore/recommended-for-you",
+    "https://www.tumblr.com/likes",
+  ];
 
-  // blocks can share either [1] the same ID or [2] the same source URL
-  return blocks2.filter((block) => {
-    const matchById = map1.has(block.blockId);
-    const matchBySource = Array.from(map1.values()).some(
-      (b) => b.source === block.source
-    );
-    return matchById || matchBySource;
-  });
+  // Create a map for blocks1 with blockId as key
+  for (const block of blocks1) {
+    map1.set(block.blockId, block);
+  }
+
+  const commonBlocksMap = new Map();
+
+  console.log(
+    `Comparing ${blocks1.length} blocks from user1 with ${blocks2.length} blocks from user2`
+  );
+
+  for (const block of blocks2) {
+    const blockInMap1 = map1.get(block.blockId);
+
+    let isCommon = false;
+    let combinedChannels = [];
+
+    // Check for match by blockId
+    if (blockInMap1) {
+      isCommon = true;
+      combinedChannels = Array.from(
+        new Set([...blockInMap1.channels, ...block.channels])
+      );
+      console.log(`✅ Match found by blockId: ${block.blockId}`);
+      console.log(`User1 channels: ${blockInMap1.channels.join(", ")}`);
+      console.log(`User2 channels: ${block.channels.join(", ")}`);
+    } else if (block.source && !excludedUrls.includes(block.source)) {
+      // If no match by blockId, check for match by source URL (excluding specified URLs)
+      for (const b of map1.values()) {
+        if (b.source && b.source === block.source) {
+          isCommon = true;
+          combinedChannels = Array.from(
+            new Set([...b.channels, ...block.channels])
+          );
+          console.log(`⭐️ Match found by source URL: ${block.source}`);
+          console.log(
+            `User1 blockId: ${b.blockId}, User2 blockId: ${block.blockId}`
+          );
+          console.log(`User1 channels: ${b.channels.join(", ")}`);
+          console.log(`User2 channels: ${block.channels.join(", ")}`);
+          break;
+        }
+      }
+    }
+
+    if (isCommon) {
+      commonBlocksMap.set(block.blockId, {
+        blockId: block.blockId,
+        source: block.source,
+        imageURL: block.imageURL,
+        channels: combinedChannels,
+      });
+    }
+  }
+
+  console.log(`Server: Found ${commonBlocksMap.size} common blocks`);
+
+  // Return the common blocks as an array
+  return Array.from(commonBlocksMap.values());
 }
