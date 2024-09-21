@@ -14,7 +14,7 @@ const DebugMenu = ({
         hover:text-gray-800
         font-mono px-2 py-1 bg-white"
       >
-        {isDebugMenuOpen ? "Close" : "Debug"}
+        {isDebugMenuOpen ? "Close" : "Advanced"}
       </button>
       {isDebugMenuOpen && (
         <div className="mt-1 bg-white px-2 pb-2">

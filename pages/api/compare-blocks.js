@@ -20,7 +20,7 @@ export default async function handler(req) {
     );
   }
 
-  const accessToken = "jOjmF09t2R8a_7pB-5u6VnexekhMzrtLoVVDoUityBg";
+  const accessToken = process.env.ARENA_API_KEY;
 
   const stream = new ReadableStream({
     async start(controller) {

@@ -7,7 +7,7 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Username parameter is required" });
   }
 
-  const accessToken = "jOjmF09t2R8a_7pB-5u6VnexekhMzrtLoVVDoUityBg";
+  const accessToken = process.env.ARENA_API_KEY;
 
   try {
     const userResponse = await axios.get(
