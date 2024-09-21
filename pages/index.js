@@ -221,7 +221,7 @@ export default function Home() {
   };
 
   const [concurrencyLimit, setConcurrencyLimit] = useState(5);
-  const [maxSortedChannels, setMaxSortedChannels] = useState(15);
+  const [maxSortedChannels, setMaxSortedChannels] = useState(5);
   const [isDebugMenuOpen, setIsDebugMenuOpen] = useState(false);
 
   return (

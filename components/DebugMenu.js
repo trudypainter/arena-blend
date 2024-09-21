@@ -29,7 +29,7 @@ const DebugMenu = ({
               />
             </label>
             <label className="text-xs font-mono">
-              Max Sorted Channels:
+              Max Channels:
               <input
                 type="number"
                 value={maxSortedChannels}

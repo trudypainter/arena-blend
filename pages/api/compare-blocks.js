@@ -1,8 +1,7 @@
-export const config = {
-  runtime: "edge",
-};
+export const runtime = "edge";
+export const dynamic = "force-dynamic"; // always run dynamically
 
-export default async function handler(req) {
+export default async function GET(req) {
   const { searchParams } = new URL(req.url);
   const user1 = searchParams.get("user1");
   const user2 = searchParams.get("user2");
@@ -66,10 +65,10 @@ export default async function handler(req) {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
       "Content-Encoding": "none",
+      "Access-Control-Allow-Origin": "*",
     },
   });
 }
-
 async function fetchUserBlocks(
   username,
   accessToken,
